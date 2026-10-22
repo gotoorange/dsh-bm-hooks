@@ -62,6 +62,25 @@ assert.equal(typeof plugin.apply, 'function', 'exports apply')
 // prototype; compare by value rather than by identity.
 assert.equal(JSON.stringify(plugin.inject), JSON.stringify(['slots', 'locale', 'configForms']), 'declares its client services')
 
+// --- the manifest must order this row after the packages it uses ----------
+// `dsh.client.inject` is the boot graph's ordering input. A row that needs
+// `slots` / `locale` but does not name them can load first, see no such
+// services, and silently register nothing — the page then never appears.
+{
+  const pkg = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
+  const declared = pkg.dsh?.client?.inject ?? []
+  const required = [
+    '@deepseek-ai/dsh-client-ui-slots',
+    '@deepseek-ai/dsh-client-locale',
+    '@deepseek-ai/dsh-client-ui-settings',
+  ]
+  for (const spec of required) {
+    assert.ok(declared.includes(spec), `dsh.client.inject must name ${spec} so the row loads after it`)
+  }
+  assert.equal(pkg.dsh?.client?.platform, 'web', 'the client half targets the web platform')
+  assert.ok(pkg.exports?.['./client'], 'exports a ./client bundle')
+}
+
 // --- a fake browser plugin context ---------------------------------------
 const registrations = []
 const localeDictionaries = []
@@ -110,11 +129,27 @@ const ctx = {
       ctx.configForms.requested = entryId
       return form
     },
+    /**
+     * Mirror `ConfigForms.whileServed`: run `register` immediately when the Host
+     * serves one of the namespaces (the normal case), and return a disposer.
+     * A page that registers outside this helper is the bug this stub exists to
+     * catch, so the fake keeps the same shape as the real service.
+     */
+    whileServed: (namespaces, register) => {
+      ctx.configForms.watched.push(...namespaces)
+      const dispose = register(new Set(namespaces))
+      return () => {
+        if (typeof dispose === 'function') dispose()
+      }
+    },
     requested: '',
+    watched: [],
   },
   slots: {
     inject: (slot, register) => {
       ctx.slots.injected.push(slot)
+      // The real `slots.inject` defers until the slot type is declared; the
+      // fake declares it immediately, which is the case the page must handle.
       return register()
     },
     register: (options, component) => {
@@ -130,6 +165,12 @@ plugin.apply(ctx)
 assert.equal(ctx.configForms.requested, 'bm-hooks', 'reads the settings form for the bm-hooks entry')
 assert.deepEqual(ctx.slots.injected, ['settings.section'], 'registers into the settings section slot')
 assert.equal(registrations.length, 1, 'one page registration')
+
+// The page must ride `whileServed`, not register unconditionally: the
+// `settings.section` slot is declared at runtime by the Settings shell, so an
+// unconditional registration can run before the slot exists and the page then
+// never appears. Every shipped settings page uses this same entry point.
+assert.ok(ctx.configForms.watched.includes('bm-hooks'), 'waits until the Host serves its namespace')
 
 const [registration] = registrations
 assert.equal(registration.options.name, 'settings.section', 'slot name')
