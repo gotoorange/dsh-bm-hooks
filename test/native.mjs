@@ -138,7 +138,7 @@ const defaultRun = (argv) => {
   return { exitCode: 0, stdout: '', stderr: '' }
 }
 
-function makeHarness({ config = {}, bm = {}, services = {}, webServer = false } = {}) {
+function makeHarness({ config = {}, bm = {}, services = {}, webServer = false, tools: toolsEnabled = true } = {}) {
   const listeners = new Map()
   const commands = []
   const tools = []
@@ -148,6 +148,17 @@ function makeHarness({ config = {}, bm = {}, services = {}, webServer = false } 
 
   const resolve = bm.resolve ?? (() => 'C:/fake/bm.exe')
   const run = bm.run ?? defaultRun
+
+  // The tool registry is optional in a composition, and its absence must not
+  // break anything else the plugin registers.
+  const toolsService = toolsEnabled
+    ? {
+        register: (definition) => {
+          tools.push(definition)
+          return () => {}
+        },
+      }
+    : undefined
 
   // Only present when a case asks for it, mirroring a composition without the
   // Web carrier: the plugin must still load and work there.
@@ -201,12 +212,14 @@ function makeHarness({ config = {}, bm = {}, services = {}, webServer = false } 
     },
     // The model-facing `bm_set_project` tool. Cordis' real registry validates
     // the definition; here we only record it so a case can execute it.
-    tools: {
-      register: (definition) => {
-        tools.push(definition)
-        return () => {}
-      },
-    },
+    tools: toolsService
+      ? {
+          register: (definition) => {
+            tools.push(definition)
+            return () => {}
+          },
+        }
+      : undefined,
     on: (event, handler, options) => {
       if (!listeners.has(event)) listeners.set(event, [])
       listeners.get(event).push({ handler, options })
@@ -229,6 +242,9 @@ function makeHarness({ config = {}, bm = {}, services = {}, webServer = false } 
       }
       if (services.includes('settings')) {
         callback({ ...child, settings: { configure: () => () => {} } })
+      }
+      if (services.includes('tools') && toolsService) {
+        callback({ ...child, tools: toolsService })
       }
       if (services.includes('webServer') && webServerService) {
         callback({ ...child, webServer: webServerService })
@@ -1119,6 +1135,24 @@ console.log('ok  config: defaults carry no path, version, or project; preference
   assert.equal(withServer.routes[0].path, '/bm-hooks/api', 'the settings bridge path')
   assert.equal(withServer.routes[0].kind, 'prefix', 'a prefix route')
   console.log('ok  web bridge: registered only when a web server exists')
+}
+
+// --- 34. a missing optional service must not abort the rest of apply ----
+// `tools` is optional. Registering it directly on `ctx` throws when the
+// registry is absent, and that throw skips every later registration — the web
+// route included — so the Settings page silently loses its data source while
+// commands keep working. Reach it through its own ctx.inject instead.
+{
+  const h = makeHarness({
+    config: { project: 'project-memory' },
+    webServer: true,
+    tools: false,
+    // No `tools` registry at all.
+  })
+  assert.equal(h.tools.length, 0, 'no tool registered without a registry')
+  assert.equal(h.commands.length, 4, 'commands still registered')
+  assert.equal(h.routes.length, 1, 'the web route still registers without tools')
+  console.log('ok  optional tools: absence does not abort later registrations')
 }
 
 console.log('\nall checks passed')
