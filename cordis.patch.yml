@@ -1,0 +1,5 @@
+# Installed as a bundle: selecting it in the profile adds this row.
+# The row id is the stable handle the plugin manager and profile patches address.
+- insert:
+    - id: bm-hooks
+      name: 'dsh-bm-hooks'

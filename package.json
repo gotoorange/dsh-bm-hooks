@@ -1,0 +1,73 @@
+{
+  "name": "dsh-bm-hooks",
+  "version": "0.1.0",
+  "description": "Basic Memory lifecycle hooks for the DeepSeek Harness: session brief, pre-compaction checkpoints, and inbox maintenance over native extension points",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/projects.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "basic-memory",
+    "memory",
+    "hooks"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "*",
+    "@deepseek-ai/dsh-commands": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-subprocess": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-ui-settings": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/native.mjs && node test/client.mjs",
+    "test:live": "node test/projects.mjs",
+    "check": "node --check lib/index.js && node --check lib/projects.js && node --check lib/client.js && npm test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gotoorange/dsh-bm-hooks.git"
+  },
+  "homepage": "https://github.com/gotoorange/dsh-bm-hooks#readme",
+  "bugs": {
+    "url": "https://github.com/gotoorange/dsh-bm-hooks/issues"
+  }
+}
