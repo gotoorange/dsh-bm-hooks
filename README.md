@@ -1,71 +1,50 @@
 # dsh-bm-hooks
 
-Basic Memory lifecycle hooks as a **native DeepSeek Harness plugin**, plus a
-Settings page for the three preferences that are actually user choices.
+[English](README.en.md) | **简体中文**
 
-Mount it like any other DSH plugin — no bridge, no experimental mods package,
-no hook config file. It drives the `bm` CLI from the harness's own extension
-points, so it does the two things an external-command hook bridge cannot:
+把 Basic Memory 的生命周期钩子做成 **DeepSeek Harness 原生插件**，外加一个
+Settings 面板，用来修改真正属于「用户偏好」的那几项。
 
-- reads the live transcript via `session.deriveMessages()`, because a hook
-  process only ever receives an empty `transcript_path`;
-- writes the checkpoint at the **real** PreCompact moment — the
-  `compaction/start` session event, appended before summarization begins, while
-  the surface is still intact.
+它和其他 DSH 插件一样安装、一样加载 —— 不需要 bridge，不需要实验性 mods 包，
+不需要任何 hook 配置文件。它直接挂在 harness 自己的扩展点上调用 `bm` CLI，
+因此能做到外部命令钩子桥做不到的两件事：
 
-Inspired by Basic Memory's own `bm hook` semantics for Claude Code and Codex.
-The lifecycle contract is the same; the implementation uses DSH's native
-extension points instead of an external hook process.
+- **能读到活的对话记录**：通过 `session.deriveMessages()`。外部钩子进程拿到的
+  `transcript_path` 永远是空的，所以它做不到。
+- **在真正的 PreCompact 时刻写检查点**：`compaction/start` 会话事件在摘要开始
+  之前追加，此时对话表面还完整。
+
+设计对齐 Basic Memory 自己的 `bm hook` 语义（Claude Code / Codex 那一套）。
+生命周期契约相同，区别是实现走 DSH 原生扩展点，而不是外部钩子进程。
 
 ---
 
-## Event mapping
+## 事件映射
 
-| Basic Memory hook | Claude Code / Codex | This plugin |
+| Basic Memory 钩子 | Claude Code / Codex | 本插件 |
 |---|---|---|
-| `bm hook session-start` | `SessionStart` | `agent/created` warms the CLI; `agent/pre-step` delivers the brief as source-attributed context |
-| `bm hook pre-compact` | `PreCompact` | `session/event` → `compaction/start` — **a true pre-compaction checkpoint** |
-| `bm hook flush` | *(never scheduled)* | `agent/disposed`, throttled by `flushIntervalHours` |
+| `bm hook session-start` | `SessionStart` | `agent/created` 预热 CLI；`agent/pre-step` 以「带来源标注的上下文」投递简报 |
+| `bm hook pre-compact` | `PreCompact` | `session/event` → `compaction/start` —— **真正的压缩前检查点** |
+| `bm hook flush` | *（从不被调度）* | `agent/disposed`，由 `flushIntervalHours` 节流 |
 | `bm hook status` | — | `/bm-status` |
-| *(manual checkpoint)* | — | `/bm-checkpoint` |
-| `bm hook stop` | retired `Stop` | not needed; it exists only to unblock stale pre-upgrade configs |
+| *（手动检查点）* | — | `/bm-checkpoint` |
+| `bm hook stop` | 已废弃的 `Stop` | 不需要；它只为兼容升级前的旧配置而存在 |
 
-Why `agent/created` and `agent/pre-step` are split: `agent/created` is the only
-place that runs *before* the first turn, and `agent/pre-step` is the only place
-whose result can carry `messages`. The brief subprocess starts at creation, the
-delivery happens on step 1, and the result is cached per session so a resumed
-turn does not re-run it.
+为什么 `agent/created` 和 `agent/pre-step` 要拆开：`agent/created` 是唯一在
+**首轮之前**执行的位置，而 `agent/pre-step` 是唯一返回值能携带 `messages` 的位置。
+所以简报子进程在创建时启动，在第一轮投递，结果按会话缓存 —— 续跑的轮次不会重复执行。
 
 ---
 
-## Install
+## 安装
 
-### From npm
+本插件是标准 **bundle**（`package.json` 声明了 `dsh.bundle.patch`），
+所有安装路径都由 DSH 的插件安装器完成，你不需要碰 profile 里的任何文件。
 
-```powershell
-dsh plugin add dsh-bm-hooks
-```
+### 方式一：Web 侧边栏「插件」页（推荐）
 
-### From a local checkout
-
-```powershell
-dsh plugin add file:C:\path\to\dsh-bm-hooks
-```
-
-Use `file:`, not `link:`. pnpm treats them differently for peer resolution:
-
-| Spec | `node_modules` entry | Peers resolve from | Works? |
-|---|---|---|---|
-| `link:<dir>` | symlink to the checkout | the **checkout's** real path | ❌ `Cannot find package '@deepseek-ai/schemastery'` |
-| `file:<dir>` | copied package | the **profile's** `node_modules` | ✅ |
-
-A `link:` install makes the plugin resolve its peers from the source directory,
-where no harness package exists, so it fails to load. `file:` copies the package
-into the profile and resolves peers there, which is what the Loader expects.
-The plugin manager's own guidance points at `link:` for source checkouts; for
-this package the observable result is a load failure, so use `file:`.
-
-Selecting the bundle inserts this row into the profile:
+打开侧边栏的 **插件** 页面，搜索 `dsh-bm-hooks`，点安装。
+安装器会自动完成：写入 profile 依赖、选中 bundle、把下面这行插进配置层。
 
 ```yaml
 - insert:
@@ -73,20 +52,39 @@ Selecting the bundle inserts this row into the profile:
       name: 'dsh-bm-hooks'
 ```
 
-### Prerequisite: `bm` on PATH
+### 方式二：让 Agent 安装
+
+```
+plugin_manager  action: install_bundle   target: dsh-bm-hooks
+```
+
+`install_bundle` 和插件页走同一套 `installBundle` 实现，结果一致。
+（该工具需要 `danger-full-access`，或对该次调用单独授权。）
+
+### 方式三：命令行
+
+```powershell
+dsh plugin add dsh-bm-hooks
+```
+
+安装结果看 `dsh plugin list`：`dsh-bm-hooks` 会出现在依赖里，同时出现在
+`dsh.profile.bundles` 中。
+
+> 安装器会在 pnpm 成功之后才选中 bundle，失败则回滚 profile 清单与 lockfile。
+> 因此**不需要**手工编辑 `package.json` 或 `cordis.patch.yml`。
+
+### 前置条件：`bm` 必须在 PATH 上
 
 ```powershell
 uv tool install basic-memory
 ```
 
-No version pin: the package tracks the latest release, and `bm update` /
-auto-update keeps it current. The only hard requirement is that the installed
-CLI **ships the `hook` command group**, which arrived in v0.23 — a stale
-pre-0.23 `bm` on PATH cannot work, which is exactly what bm's own
-`_supports_hook()` probe guards against.
+不锁版本：本插件跟随最新版，`bm update` / 自动更新保持其最新。
+唯一的硬要求是安装的 CLI **包含 `hook` 命令组**，该命令组在 v0.23 引入 ——
+PATH 上若是 0.23 之前的旧版 `bm`，无法工作。
 
-`uv tool install` puts the shims in `%USERPROFILE%\.local\bin`, which is **not
-on PATH by default**. Add it once:
+`uv tool install` 把 shim 放在 `%USERPROFILE%\.local\bin`，这个目录**默认不在 PATH 上**。
+加一次即可：
 
 ```powershell
 $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
@@ -95,15 +93,14 @@ if (($userPath -split ';') -notcontains "$env:USERPROFILE\.local\bin") {
 }
 ```
 
-**A DSH restart is required after changing PATH** — the running process keeps the
-environment it was launched with, so a newly added entry is invisible to it.
+**改完 PATH 必须重启 DSH** —— 运行中的进程保留的是启动时的环境，
+新加的目录对它不可见。
 
 ---
 
-## Configuration
+## 配置
 
-The whole config is optional. The plugin carries no path, version, project
-name, or workspace path:
+整份配置都是可选的。插件不携带任何路径、版本号、项目名或工作区路径：
 
 ```yaml
 - id: bm-hooks
@@ -118,243 +115,225 @@ name, or workspace path:
     autoDetectProject: false
 ```
 
-| Key | Default | Editable live | Meaning |
+| 键 | 默认值 | 可在线修改 | 含义 |
 |---|---|---|---|
-| `enabled` | `true` | | `false` unmounts every listener and command. |
-| `bmArgv` | `['bm']` | | argv prefix for the CLI. A bare name, resolved through PATH. |
-| `harness` | `codex` | | `--harness` value; `codex` matches DSH's snake_case payload shape. |
-| `project` | `''` | ✅ | Basic Memory project for the brief and checkpoints. A user preference: set it in Settings or with `/bm-project`. |
-| `recallTimeframe` | `7d` | ✅ | Recall window for the brief. |
-| `briefLimit` | `5` | ✅ | Entries the brief shows per section. |
-| `autoDetectProject` | `false` | ✅ | Match each session's project to its working directory. See below. |
-| `captureFolder` | `codex` | | Folder inside the project. Required by bm's `--folder`; a relative name, not a path. |
-| `noteType` | `session` | | Frontmatter `type`. |
-| `titlePrefix` | `DSH session` | | Title prefix; bm's own values are `Session` / `Codex session`. |
-| `projectDir` | `''` | | `--project-dir` for bm's settings lookup; empty uses the session cwd. |
-| `injectBrief` | `true` | | Deliver the session brief. |
-| `briefWaitMs` | `8000` | | How long a step waits for the brief before proceeding without it. `0` never waits. |
-| `checkpointOnCompact` | `true` | | Write a checkpoint at `compaction/start`. |
-| `flushIntervalHours` | `24` | | Minimum hours between inbox sweeps. `0` disables. |
-| `flushRetentionDays` | `30` | | `--older-than-days` for the sweep. |
-| `timeoutMs` | `120000` | | Per-CLI-call ceiling, enforced by aborting the managed process range. |
+| `enabled` | `true` | | `false` 时卸载全部监听器与命令。 |
+| `bmArgv` | `['bm']` | | 调用 CLI 的 argv 前缀。裸名字，按 PATH 解析。 |
+| `harness` | `codex` | | `--harness` 取值；`codex` 对应 DSH 输出的 snake_case 载荷形状。 |
+| `project` | `''` | ✅ | 简报与检查点使用的 Basic Memory 项目。属于用户偏好：在 Settings 或 `/bm-project` 里改。 |
+| `recallTimeframe` | `7d` | ✅ | 简报的召回窗口。 |
+| `briefLimit` | `5` | ✅ | 简报每节显示的条目数。 |
+| `autoDetectProject` | `false` | ✅ | 按会话工作目录匹配项目。见下文。 |
+| `captureFolder` | `codex` | | 项目内的文件夹。bm 的 `--folder` 是必填参数；这里是相对名称，不是路径。 |
+| `noteType` | `session` | | frontmatter 里的 `type`。 |
+| `titlePrefix` | `DSH session` | | 标题前缀；bm 自己的取值是 `Session` / `Codex session`。 |
+| `projectDir` | `''` | | bm 查找 settings 用的 `--project-dir`；留空则用会话 cwd。 |
+| `injectBrief` | `true` | | 是否投递会话简报。 |
+| `briefWaitMs` | `8000` | | 一步最多等简报多久；超时则不带上下文继续。`0` 表示从不等待。 |
+| `checkpointOnCompact` | `true` | | 是否在 `compaction/start` 写检查点。 |
+| `flushIntervalHours` | `24` | | 两次收件箱清扫之间的最小间隔。`0` 关闭。 |
+| `flushRetentionDays` | `30` | | 清扫时的 `--older-than-days`。 |
+| `timeoutMs` | `120000` | | 单次 CLI 调用上限，通过中止受管进程组强制执行。 |
 
-The ✅ rows are declared `.volatile()`, so they are live references: the plugin
-reads them through `.get()` on every use, and a Settings write is picked up
-without a restart.
+标 ✅ 的字段声明为 `.volatile()`，是活引用：插件每次使用时通过 `.get()` 读取，
+Settings 里的写入无需重启即可生效。
 
-### Which project a session uses
+### 一个会话用哪个项目
 
-Resolution order, most specific first:
+解析优先级，从最具体到最宽泛：
 
-1. an explicit per-session switch — `/bm-project <name>` or the `bm_set_project` tool;
-2. a project whose root contains the session's working directory (`autoDetectProject`);
-3. the configured `project`;
-4. Basic Memory's own `default_project`.
+1. 会话级显式切换 —— `/bm-project <name>` 或 `bm_set_project` 工具；
+2. 工作目录落在某个项目根目录内（`autoDetectProject`）；
+3. 配置里的 `project`；
+4. Basic Memory 自己的 `default_project`。
 
-`autoDetectProject` is **off by default** because it adds one cached
-`bm project list --json` call per session and lets a cwd match outrank the
-configured project. Enable it when one profile spans several repositories.
+`autoDetectProject` **默认关闭**：它会给每个会话增加一次
+`bm project list --json` 调用（有缓存），并且允许 cwd 匹配压过配置值。
+只有当一份 profile 服务多个仓库时才建议打开。
 
-Matching is by **longest prefix** and separator-aware, so `D:/work/deep` wins
-over `D:/work`, and `/work/ab` is not treated as living under `/work/a`. `~` and
-symlinked spellings are canonicalized before comparison. Measured against a
-real two-project setup:
+匹配按**最长前缀**、并区分分隔符：`D:/work/deep` 优先于 `D:/work`，
+而 `/work/ab` 不会被当成 `/work/a` 的子目录。`~` 与符号链接写法在比较前会做规范化。
+实测（真实两项目环境）：
 
 ```
 D:/project-memory              => project-memory
-D:/project-memory/notes/deep   => project-memory     ← subdirectory inherits
+D:/project-memory/notes/deep   => project-memory     ← 子目录继承
 ~\\basic-memory                => main
-C:/Windows                     => (no match)         → falls back
-some/workspace/dir             => (no match)         → falls back to default_project
+C:/Windows                     => (无匹配)           → 回退
+some/workspace/dir             => (无匹配)           → 回退到 default_project
 ```
 
-Step 4 is the fallback that keeps a plain workspace directory from losing its
-brief entirely.
+第 4 步这个回退，是为了一般的 workspace 目录不至于把简报整个丢掉。
 
 ---
 
-## Settings page
+## Settings 面板
 
-The client half adds a **Basic Memory** section to Settings with three controls
-and one switch:
+client 半身为 Settings 增加一个 **Basic Memory** 分页，三个控件加一个开关：
 
-| Control | Binds | Behavior |
+| 控件 | 绑定 | 行为 |
 |---|---|---|
-| Project | `project` | Dropdown from `bm project list --json`, plus a refresh button |
-| Recall window | `recallTimeframe` | `1d` / `7d` / `30d` |
-| Entries per section | `briefLimit` | Number, 1–20 |
-| Match project to working directory | `autoDetectProject` | Toggle |
+| 项目 | `project` | 下拉框，数据来自 `bm project list --json`，带刷新按钮 |
+| 召回窗口 | `recallTimeframe` | `1d` / `7d` / `30d` |
+| 每节条数 | `briefLimit` | 数字，1–20 |
+| 按工作目录匹配项目 | `autoDetectProject` | 开关 |
 
-Writes go through `ctx.configForms`, the Host settings transport, as one atomic
-mutation with the revision that was read — the same path any other settings page
-takes. The page never edits `cordis.patch.yml` itself; doing so would bypass
-Loader validation and the stale-write check.
+写入走 `ctx.configForms`，即 Host 的 settings 传输层，用读到的 revision 做一次
+原子提交 —— 和其他设置页走同一条路径。面板**不会**自己去改 `cordis.patch.yml`，
+那样会绕过 Loader 校验和并发写的版本检查。
 
-The project *list* is not part of the settings document, so the Host half serves
-it at `GET /bm-hooks/api/projects` (loopback-only, no-store). That route is
-registered only when a `webServer` is composed; in a headless deployment the
-plugin runs normally and the page simply has no catalogue to show.
+项目**列表**不属于 settings 文档，所以 Host 半身在
+`GET /bm-hooks/api/projects` 提供它（仅回环地址、`no-store`）。
+该路由只在组合了 `webServer` 时注册；无头部署下插件照常工作，只是面板没有列表可显示。
 
-`lib/client.js` is a **built artifact**, not ordinary ESM: it registers a lazy
-factory on `window.__ModuleLoader__` and takes React from the platform module
-table. There is no build step — the file in the package is the file the browser
-runs. Editing it in place is the supported way to change the page.
+`lib/client.js` 是**构建产物**而非普通 ESM：它把懒加载工厂注册到
+`window.__ModuleLoader__`，React 从平台模块表取用。没有构建步骤 ——
+包里的这个文件就是浏览器执行的那份。就地修改它是受支持的做法。
 
 ---
 
-## Commands
+## 命令
 
 ```
-/bm-project              # list Basic Memory projects and show the current one
-/bm-project <name>       # switch to another project (persists to the profile)
-/bm-status               # bm hook status: inbox depth, last flush, settings, versions
-/bm-checkpoint           # write a checkpoint for this session now
-/bm-flush                # sweep the inbox now instead of waiting for the interval
+/bm-project              # 列出 Basic Memory 项目并显示当前值
+/bm-project <name>       # 切换到另一个项目（持久化到 profile）
+/bm-status               # bm hook status：收件箱深度、上次清扫、设置、版本
+/bm-checkpoint           # 立即为本会话写一个检查点
+/bm-flush                # 立即清扫收件箱，不必等间隔
 ```
 
-`/bm-project <name>` verifies the name against `bm project list --json` first, so
-a typo cannot point the brief and checkpoints at a project that does not exist.
-It writes through `configEditor.edit()` — the same service a Settings write uses —
-so the change persists to the profile patch and the Loader reconciles it live.
-Without a composed config editor it says so and points at `cordis.patch.yml`
-instead of pretending to save.
+`/bm-project <name>` 会先用 `bm project list --json` 校验项目名，
+所以打错字不会让简报和检查点指向一个不存在的项目。
+它通过 `configEditor.edit()` 写入 —— 与 Settings 写入同一个服务 ——
+因此改动会持久化到 profile patch，并由 Loader 在线生效。
+没有组合 config editor 时，它会如实说明并指向 `cordis.patch.yml`，而不会假装保存成功。
 
-### `bm_set_project` (model-facing)
+### `bm_set_project`（供模型调用）
 
-The plugin never parses conversation text to guess a project — that is fragile
-and unpredictable. Instead it publishes one deterministic switch primitive:
+插件**从不**解析对话文本去猜项目 —— 那既脆弱又不可预测。
+它改为提供一个确定性的切换原语：
 
 ```
 bm_set_project({ project?: string })
 ```
 
-The description tells the model to call it when the user names a project,
-repository, or workspace. Omit the argument to list what is available. The
-binding is **per session** and writes no configuration, so a model-side switch
-never changes another session's behaviour.
+工具描述会让模型在用户点名某个项目、仓库或工作区时调用它。
+不带参数则列出可用项目。该绑定是**会话级**的，不写任何配置，
+所以模型侧切换不会影响其他会话的行为。
 
 ---
 
-## `bm hook flush` — nothing schedules it
+## `bm hook flush` 没有任何东西调度它
 
-Grepping the whole installed Basic Memory package: `basic_memory.hooks.archive`
-is imported in **exactly one place** — `cli/commands/hook.py`, the
-`bm hook flush` command itself. There is no daemon, no startup hook, no
-MCP-side sweep, no cron. So on Claude Code and Codex the inbox only grows, and
-`processed/` is never pruned.
+在已安装的整个 Basic Memory 包里检索：`basic_memory.hooks.archive`
+**只在一处**被 import —— `cli/commands/hook.py`，也就是 `bm hook flush` 命令自己。
+没有守护进程、没有启动钩子、没有 MCP 侧清扫、没有 cron。
+所以在 Claude Code 和 Codex 上，收件箱只会不断增长，`processed/` 永不清理。
 
-This plugin therefore sweeps at `agent/disposed`, throttled by
-`flushIntervalHours`.
+本插件因此在 `agent/disposed` 时清扫，由 `flushIntervalHours` 节流。
 
-Two properties make automating it safe, both from bm's own implementation:
+把这个动作自动化是安全的，两个性质都来自 bm 自己的实现：
 
-- **It never writes to the graph.** `archive.flush` only moves valid envelopes
-  into `processed/`, dedups by `idempotency_key`, and prunes by retention.
-- **It fails safe on junk.** Invalid or future-`envelope_version` files stay
-  pending for inspection instead of being deleted.
+- **它从不写图谱**：`archive.flush` 只把合法信封移进 `processed/`、
+  按 `idempotency_key` 去重、按保留期清理。
+- **遇到脏数据会安全失败**：非法或 `envelope_version` 超前的文件保持待处理状态，
+  留待人工查看，而不是被删除。
 
-Set `flushIntervalHours: 0` and schedule `bm hook flush` externally if you
-prefer; the result is identical.
+如果你更喜欢外部调度 `bm hook flush`，把 `flushIntervalHours` 设为 `0` 即可，结果完全一样。
 
 ---
 
-## Failure behavior
+## 失败行为
 
-Every CLI call is contained:
+每一次 CLI 调用都被兜住：
 
-| Failure | Behavior |
+| 失败情形 | 行为 |
 |---|---|
-| `bm` not resolvable | logged at `warn`; the step still enters with no context |
-| CLI exits non-zero | logged at `warn` with the stderr tail; the session continues |
-| spawn throws | returned as a failed run; logged, never thrown into the loop |
-| brief unavailable | no context message added; the turn proceeds |
-| no user turn to checkpoint | `/bm-checkpoint` reports it; nothing is written |
-| project list unreadable | the brief falls back to the configured project |
+| `bm` 无法解析 | 记 `warn`；这一步仍然进入，只是没有上下文 |
+| CLI 非零退出 | 记 `warn` 并带上 stderr 尾部；会话继续 |
+| spawn 抛异常 | 作为失败结果返回；记录日志，绝不抛进主循环 |
+| 简报不可用 | 不追加上下文消息；这一轮照常进行 |
+| 没有用户回合可做检查点 | `/bm-checkpoint` 如实报告；不写任何东西 |
+| 项目列表读不到 | 简报回退到配置里的项目 |
 
-This mirrors bm's own hook contract: active lifecycle verbs are fail-open, so a
-capture or recall error must never disrupt the agent session.
-
----
-
-## Notes on the implementation
-
-- **The brief is not pinned to step 1.** `bm` is a Python process: measured at
-  ~3.5 s warm and ~12.5 s cold on this machine. Blocking the first step on that
-  would be wrong, so `agent/pre-step` races the brief against `briefWaitMs` and
-  delivers it on whichever step first finds it ready. The subprocess is started
-  once at `agent/created` and cached, so a slow first step never starts a second.
-- **Timers are `unref()`ed.** The `timeoutMs` deadline aborts the managed
-  process range, but the timer must never be the reason the host process stays
-  alive.
-- **Source labels are load-bearing.** Every injected message carries
-  `source: { kind: 'bm-hooks', form: 'snapshot', sections: [...] }`. An
-  unlabeled context message would render as a user prompt in derived history.
-- **`session/event` is observe-only.** The emitter does not await listeners, so
-  the checkpoint work is started and contained inside the handler.
-- **Subagent sessions are skipped.** `session.header.origin === 'subagent'`
-  means the session is a child; briefing or checkpointing it would duplicate
-  the parent's work.
-- **`bm tool write-note` has no `--metadata` flag**, but frontmatter inside the
-  note's own content takes precedence over `--type`, so the frontmatter rides
-  the content and the note keeps every metadata key.
-- **Every external call is a command, never an MCP call.** The plugin spawns
-  `bm` through `ctx.subprocess` for all its operations. It never routes through
-  `mcp__basic-memory__*` tools: a lifecycle hook is a command boundary, so this
-  keeps one execution path with one failure mode, no coupling to whether an MCP
-  connector happens to be connected, and no second client of the same database.
-- **No settings file is ever written.** Configuration lives in DSH alone. The
-  brief is built from explicit `--project` queries, so neither
-  `~/.codex/basic-memory.json` nor `~/.claude/settings.json` is created, read,
-  or modified.
-- **Only `@deepseek-ai/schemastery` is imported.** A profile plugin resolves its
-  peers from the profile's own `node_modules`; packages like
-  `@deepseek-ai/dsh-llm` or `@deepseek-ai/dsh-tools` live in the app archive
-  and are not resolvable there. Importing one makes the plugin fail to load
-  with `Cannot find package`. Both the tool definition and the context message
-  are therefore built from the harness's documented shapes rather than from its
-  constructors.
+这与 bm 自己的钩子契约一致：活跃的生命周期动词都是 fail-open 的，
+捕获或召回出错绝不能打断 Agent 会话。
 
 ---
 
-## Tests
+## 实现说明
+
+- **简报不绑定在第 1 步。** `bm` 是 Python 进程：本机实测热启动约 3.5 秒、
+  冷启动约 12.5 秒。把首步阻塞在这上面是错的，所以 `agent/pre-step` 让简报
+  与 `briefWaitMs` 赛跑，在**第一个发现它已就绪**的步骤投递。子进程在
+  `agent/created` 时只启动一次并缓存，慢的首步不会起第二个。
+- **定时器都 `unref()` 过。** `timeoutMs` 的截止时间会中止受管进程组，
+  但定时器绝不能成为宿主进程不退出的原因。
+- **来源标注是承重的。** 每条注入消息都带
+  `source: { kind: 'bm-hooks', form: 'snapshot', sections: [...] }`。
+  没有来源标注的上下文消息，在派生历史里会被渲染成用户提问。
+- **`session/event` 是只观察的。** 发射方不 await 监听器，所以检查点的工作
+  必须在处理器内部启动并自我兜底。
+- **子代理会话被跳过。** `session.header.origin === 'subagent'` 表示这是子会话，
+  给它做简报或检查点会重复父会话的工作。
+- **`bm tool write-note` 没有 `--metadata` 参数**，但笔记内容自身 frontmatter
+  的优先级高于 `--type`，所以 frontmatter 随内容一起写入，元数据一个都不丢。
+- **所有外部调用都是命令，不是 MCP 调用。** 插件通过 `ctx.subprocess` 调 `bm`。
+  它从不走 `mcp__basic-memory__*` 工具：生命周期钩子是命令边界，
+  这样只有一条执行路径、一种失败模式，不依赖 MCP 连接器是否恰好连着，
+  也不会产生同一个数据库的第二个客户端。
+- **绝不写 settings 文件。** 配置只存在于 DSH 一侧。简报通过显式 `--project`
+  查询构建，因此 `~/.codex/basic-memory.json` 和 `~/.claude/settings.json`
+  都不会被创建、读取或修改。
+- **只 import `@deepseek-ai/schemastery`。** profile 插件从 profile 自己的
+  `node_modules` 解析 peer；`@deepseek-ai/dsh-llm`、`@deepseek-ai/dsh-tools`
+  这类包只存在于 app 归档里，在那里解析不到。import 它们会让插件以
+  `Cannot find package` 加载失败。所以工具定义和上下文消息都按 harness
+  的公开形状自建，而不是 import 它的构造函数。
+
+---
+
+## 测试
 
 ```powershell
-node test/native.mjs      # 36 offline checks: plugin shape, config, lifecycle, commands, tools
-node test/client.mjs      # 3 checks: the client bundle registers and writes through settings
-node test/projects.mjs    # 4 checks: normalization and matching against the real bm CLI
+node test/native.mjs      # 36 项离线检查：插件形状、配置、生命周期、命令、工具
+node test/client.mjs      # 3 项：client bundle 注册与写入路径
+node test/projects.mjs    # 4 项：对着真实 bm CLI 验证归一化与匹配
 ```
 
-`native.mjs` loads the real `lib/index.js`, stubs only `@deepseek-ai/schemastery`,
-and drives the plugin through a fake Cordis context. It also guards the three
-constraints above: no harness-internal import, no MCP tool call, and no settings
-file written.
+`native.mjs` 加载真实的 `lib/index.js`，只 stub `@deepseek-ai/schemastery`，
+并通过一个假的 Cordis 上下文驱动插件。它同时守卫上面三条约束：
+不 import harness 内部包、不调 MCP 工具、不写 settings 文件。
+
+三个套件都不依赖当前工作目录，可以用任意 cwd 启动。
 
 ---
 
-## Known limitations
+## 已知限制
 
-- **`link:` installs do not load.** See [Install](#install). Use `file:` for a
-  local checkout, or install from npm.
-- **A restart is needed to pick up code changes.** The plugin is loaded once at
-  startup; `file:` installs copy the package, so re-run the install (or restart)
-  after editing the checkout. Settings *values* need no restart, because the
-  volatile fields are live references.
-- **The Settings page cannot be verified without a browser.** The bundle's
-  registration, services, and write path are covered by `test/client.mjs`; the
-  rendered result is not. Treat "it appears in Settings" as a manual check.
-- **Project auto-detection costs one CLI call per session** when enabled, and
-  the result is cached for 60 seconds. A project added mid-session appears after
-  that window or on the next session.
-- **The brief is extractive and capped.** It shows at most `briefLimit` entries
-  per section and does not summarize note bodies; the full graph stays in Basic
-  Memory.
-- **`bm` must be on the PATH the harness was launched with.** A PATH edit made
-  while DSH is running is invisible until restart.
-- **The project list route is loopback-only.** A deployment that serves the GUI
-  on a non-loopback address will see the page load without a catalogue.
+- **必须用插件安装器安装。** 本包是标准 bundle，由插件页 / `plugin_manager` /
+  `dsh plugin add` 完成依赖写入与 bundle 选中；手工把目录塞进 profile
+  不属于支持路径 —— profile 插件的 peer 是从 profile 的 `node_modules` 解析的，
+  绕过安装器就没有这层解析，插件会以 `Cannot find package` 加载失败。
+- **代码改动需要重启。** 插件在启动时加载一次。Settings 的**取值**不需要重启，
+  因为那些字段是活引用；但插件**代码**更新后必须重启 DSH。
+- **发布到 npm 之前，插件市场里搜不到。** 仓库已开源，包名 `dsh-bm-hooks`
+  在 registry.npmjs.org 上未被占用；执行 `npm publish --access public` 之后，
+  上面三种安装方式才真正可用。
+- **Settings 面板的渲染未经浏览器验证。** bundle 的注册、服务声明和写入路径
+  由 `test/client.mjs` 覆盖，但真实渲染没有。请把「面板出现在 Settings 里」
+  当作一次手动确认。
+- **项目自动识别每会话一次 CLI 调用**（开启时），结果缓存 60 秒。
+  会话中途新增的项目要等缓存过期或下个会话才可见。
+- **简报是抽取式的、有上限的。** 每节最多 `briefLimit` 条，不摘要笔记正文；
+  完整图谱仍在 Basic Memory 里。
+- **`bm` 必须在 harness 启动时的那份 PATH 上。** DSH 运行期间改 PATH，
+  在重启前不可见。
+- **项目列表路由仅限回环地址。** 若把 GUI 暴露在非回环地址上，
+  面板能打开但没有项目列表。
 
 ---
 
-## License
+## 许可证
 
-MIT. See [LICENSE](LICENSE).
+MIT，见 [LICENSE](LICENSE)。
