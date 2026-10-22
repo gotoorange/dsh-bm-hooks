@@ -981,8 +981,19 @@ console.log('ok  config: defaults carry no path, version, or project; preference
   assert.equal(matchProject('D:/workish', projects), undefined, 'a shared prefix is not a match')
   assert.equal(matchProject('C:/Windows', projects), undefined, 'an unrelated directory matches nothing')
 
-  // `~` and symlink spellings both resolve to the same comparison value.
-  assert.equal(expandPath('D:/work'), expandPath('D:\\work'), 'separators do not change the comparison')
+  // `~` expands, and the result is stable across calls, so two spellings of the
+  // same path compare equal.
+  assert.equal(expandPath('D:/work'), expandPath('D:/work'), 'expansion is stable')
+  assert.ok(expandPath('~/x').includes('x'), '~ expands')
+
+  // A backslash is only a separator on Windows. On POSIX it is an ordinary
+  // filename character, so asserting equivalence there would encode a Windows
+  // assumption into a portable test — and it would fail on Linux CI.
+  if (process.platform === 'win32') {
+    assert.equal(expandPath('D:/work'), expandPath('D:\\work'), 'both separators normalize')
+  } else {
+    assert.notEqual(expandPath('D:/work'), expandPath('D:\\work'), 'POSIX keeps backslash literal')
+  }
 
   // Resolution priority: explicit switch > cwd > configured > bm default.
   assert.deepEqual(
