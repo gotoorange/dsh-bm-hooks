@@ -12,10 +12,13 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, copyFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const pluginPath = join(process.cwd(), 'lib', 'index.js')
+// Anchor every path to this file, not to the caller's working directory: the
+// suite must behave the same under `node test/native.mjs`, `npm test`, and CI.
+const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
+const pluginPath = join(packageRoot, 'lib', 'index.js')
 const source = readFileSync(pluginPath, 'utf8')
 
 // --- stub the one bare import ---------------------------------------------
@@ -77,9 +80,9 @@ writeFileSync(
 // The plugin's own relative modules are copied beside the rewritten entry so
 // `./projects.js` resolves in the sandbox exactly as it does in the package.
 writeFileSync(join(stubDir, 'package.json'), JSON.stringify({ type: 'module' }), 'utf8')
-for (const file of readdirSync(join(process.cwd(), 'lib'))) {
+for (const file of readdirSync(join(packageRoot, 'lib'))) {
   if (file === 'index.js' || !file.endsWith('.js')) continue
-  copyFileSync(join(process.cwd(), 'lib', file), join(stubDir, file))
+  copyFileSync(join(packageRoot, 'lib', file), join(stubDir, file))
 }
 
 const patched = source
@@ -114,7 +117,7 @@ const plugin = await import(pathToFileURL(patchedPath).href)
 // The pure helpers are imported from the package itself: they have no harness
 // dependency, so there is nothing to stub.
 const { expandPath, matchProject, resolveProject } = await import(
-  pathToFileURL(join(process.cwd(), 'lib', 'projects.js')).href
+  pathToFileURL(join(packageRoot, 'lib', 'projects.js')).href
 )
 
 // --- a fake harness -------------------------------------------------------

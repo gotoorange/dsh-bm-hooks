@@ -27,5 +27,10 @@ jobs:
         run: node test/native.mjs
       - name: Client bundle test
         run: node test/client.mjs
+      - name: Tests must not depend on the working directory
+        run: |
+          cd "$RUNNER_TEMP"
+          node "$GITHUB_WORKSPACE/test/native.mjs"
+          node "$GITHUB_WORKSPACE/test/client.mjs"
       - name: Verify package contents
         run: npm pack --dry-run

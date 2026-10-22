@@ -12,10 +12,14 @@
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createContext, runInNewContext } from 'node:vm'
 
-const bundlePath = join(process.cwd(), 'lib', 'client.js')
+// Anchor to this file, not the caller's working directory, so the suite behaves
+// identically under `node test/client.mjs`, `npm test`, and CI.
+const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
+const bundlePath = join(packageRoot, 'lib', 'client.js')
 const source = readFileSync(bundlePath, 'utf8')
 
 // --- a minimal loader facade ---------------------------------------------
