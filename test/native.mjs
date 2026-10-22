@@ -1,12 +1,12 @@
 /**
  * Offline test for the native dsh-bm-hooks plugin.
  *
- * Loads the real `lib/index.js`, stubs the two peer modules it imports
- * (`@deepseek-ai/dsh-llm` and `@deepseek-ai/schemastery`), and drives the
- * plugin through a fake Cordis context that records listener registrations and
- * raises events the way the harness does.
+ * Loads the real `lib/index.js`, stubs the only peer module it imports
+ * (`@deepseek-ai/schemastery`), and drives the plugin through a fake Cordis
+ * context that records listener registrations and raises events the way the
+ * harness does.
  *
- *   node test-native.mjs
+ *   node test/native.mjs
  */
 
 import assert from 'node:assert/strict'
