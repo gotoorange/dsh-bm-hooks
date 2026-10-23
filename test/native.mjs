@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, copyFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, copyFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -295,6 +295,24 @@ function makeSession({ id = 'sess-1', cwd = 'C:/workspace', origin, messages = [
   }
 }
 
+/**
+ * One derived *human* turn: `user` role with `source.kind === 'user'`.
+ *
+ * `buildCheckpoint` distinguishes human turns from injected context by the
+ * source kind — `agent-loop` writes every `agent/pre-step` injection as a
+ * `user`-role message too, so role alone would count this plugin's own brief
+ * as the user's words. Fixtures must therefore carry the source explicitly,
+ * or they would silently stop exercising the checkpoint at all.
+ */
+const humanTurn = (text) => ({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })
+
+/** One derived *injected context* message: `user` role, plugin source. */
+const injectedTurn = (text, kind = 'bm-hooks') => ({
+  role: 'user',
+  source: { kind, form: 'snapshot', sections: [{ name: kind, text }] },
+  content: [{ type: 'text', text }],
+})
+
 const makeAgent = (session) => ({ id: session.id, session })
 const settle = () => new Promise((resolve) => setImmediate(resolve))
 
@@ -316,9 +334,14 @@ assert.equal(defaults.enabled, true)
 assert.deepEqual(defaults.bmArgv, ['bm'], 'bare name, resolved through PATH')
 assert.equal(defaults.harness, 'codex')
 assert.equal(read(defaults, 'project'), '', 'no project name hardcoded')
-assert.equal(defaults.captureFolder, 'codex', 'a relative folder, because bm requires --folder')
+assert.equal(defaults.captureFolder, 'sessions', "bm Claude profile's default_capture_folder")
 assert.equal(defaults.projectDir, '', 'no project dir hardcoded')
-assert.equal(defaults.noteType, 'session')
+// The full Claude-profile five-piece: adopting bm's profile means the type,
+// title prefix, tags and session-id key all match `Harness.claude` exactly, so
+// bm's own `hook session-start` sees these checkpoints as first-class.
+assert.equal(defaults.noteType, 'session', "bm Claude profile's session_note_type")
+assert.equal(defaults.titlePrefix, 'Session', "bm Claude profile's checkpoint_title_prefix")
+assert.equal(defaults.sessionIdKey, 'claude_session_id', "bm Claude profile's session_id_key")
 assert.equal(defaults.injectBrief, true)
 assert.equal(defaults.checkpointOnCompact, true)
 assert.equal(defaults.flushIntervalHours, 24)
@@ -335,6 +358,11 @@ for (const [key, raw] of Object.entries(defaults)) {
 assert.equal(typeof defaults.project.get, 'function', 'project is a live reference (volatile)')
 assert.equal(typeof defaults.recallTimeframe.get, 'function', 'recallTimeframe is volatile')
 assert.equal(typeof defaults.briefLimit.get, 'function', 'briefLimit is volatile')
+// `briefNote` is a user preference like the rest, so it is volatile and empty by
+// default: an empty note must leave the brief exactly as it was before the field
+// existed.
+assert.equal(typeof defaults.briefNote.get, 'function', 'briefNote is volatile')
+assert.equal(read(defaults, 'briefNote'), '', 'briefNote is empty by default')
 console.log('ok  config: defaults carry no path, version, or project; preferences are volatile')
 
 // --- 3. disabled plugin registers nothing --------------------------------
@@ -348,10 +376,12 @@ console.log('ok  config: defaults carry no path, version, or project; preference
 // --- 4. agent/created queries the graph for the brief -------------------
 // The brief is built from `bm tool search-notes --project ...`, not from
 // `bm hook session-start`, because the hook verb reads its recall target only
-// from a harness settings file this plugin does not use.
+// from a harness settings file this plugin does not use. `projectKnowledge` is
+// off here so this case keeps asserting exactly the three recall queries; the
+// extra project-list query the knowledge section adds is covered separately.
 {
   const session = makeSession()
-  const h = makeHarness({ config: { project: 'project-memory' } })
+  const h = makeHarness({ config: { project: 'project-memory', projectKnowledge: false } })
   h.emit('agent/created', { agent: makeAgent(session), source: 'startup' })
   await settle()
   await settle()
@@ -369,7 +399,15 @@ console.log('ok  config: defaults carry no path, version, or project; preference
   const filters = h.spawns.map((s) => s.argv.join(' '))
   assert.ok(filters.some((f) => f.includes('task') && f.includes('active')), 'queries active tasks')
   assert.ok(filters.some((f) => f.includes('decision') && f.includes('open')), 'queries open decisions')
-  assert.ok(filters.some((f) => f.includes('session') && f.includes('7d')), 'queries recent sessions')
+  // Two spellings must be recalled. `session` is what this plugin writes and
+  // what bm's Claude profile recalls, so these checkpoints stay visible to bm's
+  // own `hook session-start`. `codex_session` keeps a co-installed bm Codex
+  // profile visible. `--type` is repeatable and ORs, so both cost one query.
+  const sessionQuery = h.spawns.find((s) => s.argv.includes('session'))
+  assert.ok(sessionQuery, 'queries recent sessions')
+  const types = sessionQuery.argv.filter((a, i) => i > 0 && sessionQuery.argv[i - 1] === '--type')
+  assert.deepEqual(types, ['session', 'codex_session'], 'recalls both profile spellings')
+  assert.ok(sessionQuery.argv.includes('7d'), 'uses the configured recall window')
   console.log('ok  agent/created: queries the graph for the brief')
 }
 
@@ -382,6 +420,72 @@ console.log('ok  config: defaults carry no path, version, or project; preference
   await settle()
   assert.equal(h.spawns.length, 0, 'no queries without a project')
   console.log('ok  agent/created: no project, no brief')
+}
+
+// --- 4c. project knowledge adds one list query and a knowledge section ---
+// The knowledge section matches the session cwd against a memory-project
+// folder. It costs exactly one extra `bm project list --json` (the resolver
+// cache is cold because autoDetectProject is off), then pure filesystem work.
+{
+  const memRoot = mkdtempSync(join(tmpdir(), 'bm-native-mem-'))
+  mkdirSync(join(memRoot, 'projects', 'dangan2'), { recursive: true })
+  writeFileSync(join(memRoot, 'projects', 'dangan2', '_index.md'), '# dangan2 — 项目索引\n', 'utf8')
+
+  const run = (argv) => {
+    if (argv.includes('project') && argv.includes('list')) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          projects: [
+            { name: 'project-memory', local_path: memRoot, is_default: true },
+            { name: 'main', local_path: join(tmpdir(), 'bm-native-main'), is_default: false },
+          ],
+        }),
+        stderr: '',
+      }
+    }
+    if (argv.includes('search-notes')) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          results: [{ title: 'Refactor auth', permalink: 'notes/refactor-auth', file_path: 'notes/refactor-auth.md' }],
+        }),
+        stderr: '',
+      }
+    }
+    return { exitCode: 0, stdout: '', stderr: '' }
+  }
+
+  // The session cwd is the repo itself; the memory root is elsewhere. The
+  // knowledge section must match `dangan2` via the ancestor walk and surface
+  // the entry note before the three recall sections.
+  const session = makeSession({ cwd: 'C:/repos/dangan2' })
+  const h = makeHarness({ config: { project: 'project-memory' }, bm: { run } })
+  h.emit('agent/created', { agent: makeAgent(session), source: 'startup' })
+  await settle()
+  await settle()
+
+  const listSpawns = h.spawns.filter((s) => s.argv.includes('list'))
+  assert.equal(listSpawns.length, 1, 'one project-list query for the knowledge section')
+  const searchSpawns = h.spawns.filter((s) => s.argv.includes('search-notes'))
+  assert.equal(searchSpawns.length, 3, 'the three recall queries still run')
+  assert.equal(h.spawns.length, 4, 'list + three recall queries')
+
+  // Deliver the brief and assert the knowledge section is present and first.
+  const signal = new AbortController().signal
+  const decision = await h.raise(
+    'agent/pre-step',
+    { agent: makeAgent(session), step: 1, turn: 1, messages: [], signal },
+    () => ({ kind: 'enter', messages: [] }),
+  )
+  const text = decision.messages[0]?.content?.[0]?.text ?? ''
+  assert.match(text, /Project knowledge \(dangan2\)/, 'knowledge section present')
+  assert.match(text, /dangan2 — 项目索引/, 'entry title surfaced')
+  assert.match(text, /Read this entry note/, 'explicit read instruction')
+  assert.ok(text.indexOf('Project knowledge') < text.indexOf('Active tasks'), 'knowledge section precedes recall')
+  console.log('ok  project knowledge: one list query + entry section first')
+
+  rmSync(memRoot, { recursive: true, force: true })
 }
 
 // --- 5. subagent sessions are ignored ------------------------------------
@@ -470,6 +574,93 @@ console.log('ok  config: defaults carry no path, version, or project; preference
   console.log('ok  agent/pre-step: brief is fenced, labelled, and sectioned')
 }
 
+// --- 6d. the standing note is injected above the fence -------------------
+// `briefNote` is the user's own instruction text. It must appear, it must sit
+// OUTSIDE the fenced graph block (that block is labelled "treat as data", which
+// would neutralize an instruction placed inside it), and it must precede the
+// recalled sections so it is read first.
+{
+  const note = 'Do not build the frontend or backend.\nVerify by reading the code.'
+  const session = makeSession()
+  const h = makeHarness({ config: { project: 'project-memory', briefNote: note } })
+  h.emit('agent/created', { agent: makeAgent(session) })
+  await settle()
+
+  const decision = await h.raise(
+    'agent/pre-step',
+    { agent: makeAgent(session), step: 1, turn: 1, messages: [], signal: new AbortController().signal },
+    () => ({ kind: 'enter', messages: [] }),
+  )
+  const text = decision.messages[0].content[0].text
+  assert.match(text, /## Standing instructions/, 'has a standing-instructions heading')
+  assert.ok(text.includes('Do not build the frontend or backend.'), 'the note text is present verbatim')
+  assert.ok(text.indexOf('## Standing instructions') < text.indexOf('````text'), 'the note precedes the fenced block')
+  assert.ok(text.indexOf(note) < text.indexOf('## Active tasks'), 'the note precedes recalled sections')
+  // Everything after the opening fence and before the closing one is data. The
+  // note must not fall inside that span.
+  const open = text.indexOf('````text')
+  const close = text.lastIndexOf('````')
+  const fenced = text.slice(open, close)
+  assert.ok(!fenced.includes('Do not build the frontend or backend.'), 'the note is outside the fence')
+  console.log('ok  briefNote: standing instructions precede the fence and the recalled data')
+}
+
+// --- 6e. a standing note delivers a brief even with no project -----------
+// The note is worth saying on its own: a workspace that resolves to no project
+// still gets the instruction, and no graph query is attempted against an empty
+// `--project`.
+{
+  const session = makeSession()
+  const h = makeHarness({
+    config: { project: '', briefNote: 'Always answer in Chinese.', projectKnowledge: false },
+    bm: {
+      run: (argv) => {
+        if (argv.includes('list')) {
+          return { exitCode: 0, stdout: JSON.stringify({ projects: [{ name: 'main', local_path: 'C:/m', is_default: false }] }), stderr: '' }
+        }
+        return { exitCode: 0, stdout: JSON.stringify({ results: [] }), stderr: '' }
+      },
+    },
+  })
+  h.emit('agent/created', { agent: makeAgent(session) })
+  await settle()
+  await settle()
+
+  assert.equal(h.spawns.filter((s) => s.argv.includes('search-notes')).length, 0, 'no query without a project')
+
+  const decision = await h.raise(
+    'agent/pre-step',
+    { agent: makeAgent(session), step: 1, turn: 1, messages: [], signal: new AbortController().signal },
+    () => ({ kind: 'enter', messages: [] }),
+  )
+  const text = decision.messages[0]?.content?.[0]?.text ?? ''
+  assert.match(text, /Always answer in Chinese\./, 'the note still delivers')
+  assert.ok(!text.includes('````text'), 'no empty fenced block is emitted')
+  assert.ok(!text.includes('**Project:**'), 'no project line without a graph block')
+  console.log('ok  briefNote: delivers alone when no project resolves')
+}
+
+// --- 6f. an empty standing note changes nothing --------------------------
+// Regression guard: with `briefNote` empty the brief must be byte-identical to
+// the pre-existing shape — no heading, no stray blank line, still one fence.
+{
+  const session = makeSession()
+  const h = makeHarness({ config: { project: 'project-memory', briefNote: '' } })
+  h.emit('agent/created', { agent: makeAgent(session) })
+  await settle()
+
+  const decision = await h.raise(
+    'agent/pre-step',
+    { agent: makeAgent(session), step: 1, turn: 1, messages: [], signal: new AbortController().signal },
+    () => ({ kind: 'enter', messages: [] }),
+  )
+  const text = decision.messages[0].content[0].text
+  assert.ok(!text.includes('## Standing instructions'), 'no heading for an empty note')
+  assert.equal(text.match(/````text/g).length, 1, 'exactly one fenced block')
+  assert.ok(text.startsWith('# Basic Memory — session context\n'), 'unchanged opening')
+  console.log('ok  briefNote: empty note leaves the brief untouched')
+}
+
 // --- 7. pre-step never overrides a rejection -----------------------------
 {
   const session = makeSession()
@@ -488,9 +679,9 @@ console.log('ok  config: defaults carry no path, version, or project; preference
 // --- 8. compaction/start writes a checkpoint (the real PreCompact) -------
 {
   const messages = [
-    { role: 'user', content: [{ type: 'text', text: 'Refactor the auth module to use JWT' }] },
-    { role: 'assistant', content: [{ type: 'text', text: 'Reading files' }] },
-    { role: 'user', content: [{ type: 'text', text: 'Keep the refresh token flow' }] },
+    humanTurn('Refactor the auth module to use JWT'),
+    { role: 'assistant', source: { kind: 'model' }, content: [{ type: 'text', text: 'Reading files' }] },
+    humanTurn('Keep the refresh token flow'),
   ]
   const session = makeSession({ messages })
   // Explicit config: this case asserts the fully-configured argv shape. The
@@ -506,19 +697,54 @@ console.log('ok  config: defaults carry no path, version, or project; preference
   assert.ok(argv.includes('write-note'), 'write-note subcommand')
   assert.ok(argv.includes('--title'), 'passes a title')
   const title = argv[argv.indexOf('--title') + 1]
-  assert.match(title, /^DSH session \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} — Refactor the auth/, 'bm title format')
+  assert.match(title, /^Session \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} — Refactor the auth/, "bm Claude profile's title format")
   const content = argv[argv.indexOf('--content') + 1]
   assert.match(content, /^---\n/, 'frontmatter rides the content')
   assert.match(content, /trigger: "compaction"/, 'frontmatter trigger')
   assert.match(content, /capture: "extractive"/, 'frontmatter capture')
-  assert.match(content, /source: "dsh-plugin"/, 'frontmatter source')
   assert.match(content, /## Summary/, 'body summary')
   assert.match(content, /## Recent thread/, 'body recent thread')
   assert.match(content, /Keep the refresh token flow/, 'captures the latest user turn')
-  assert.equal(argv[argv.indexOf('--folder') + 1], 'sessions', 'capture folder')
+  assert.equal(argv[argv.indexOf('--folder') + 1], 'sessions', "bm Claude profile's capture folder")
   assert.equal(argv[argv.indexOf('--project') + 1], 'project-memory', 'project')
-  assert.equal(argv[argv.indexOf('--type') + 1], 'session', 'note type')
+  assert.equal(argv[argv.indexOf('--type') + 1], 'session', "bm Claude profile's note type")
+  assert.match(content, /type: session\n/, 'frontmatter type (bare value, as emitted)')
+  assert.match(content, /claude_session_id: "sess-1"/, "bm Claude profile's session-id key")
+  // Tags ride argv, not frontmatter; bm's Claude profile uses exactly these.
+  assert.equal(argv[argv.indexOf('--tags') + 1], 'session,auto-capture', "bm Claude profile's checkpoint_tags")
   console.log('ok  compaction/start: real PreCompact checkpoint, correct shape')
+}
+
+// --- 8c. the note type is the one bm's own lifecycle tooling recalls -------
+// Verified against bm 0.23.2 by writing one note of each spelling and running
+// `bm hook session-start` for both harness profiles:
+//
+//   type            recalled by --harness claude   recalled by --harness codex
+//   session         YES                            no
+//   codex_session   no                             YES
+//   dsh_session     no                             no
+//
+// So the plugin adopts bm's Claude profile wholesale — type, title prefix, tags,
+// session-id key and capture folder — which makes its checkpoints first-class
+// output of bm's own tooling. This assertion is the guard against inventing a
+// type no bm profile can read.
+assert.equal(
+  plugin.Config.parse({}).noteType,
+  'session',
+  "note type must stay bm Claude profile's session_note_type",
+)
+
+// The brief must recall both profile spellings, so a co-installed bm Codex
+// profile keeps working.
+{
+  const h = makeHarness({ config: { project: 'project-memory' } })
+  h.emit('agent/created', { agent: makeAgent(makeSession()) })
+  await settle()
+  await settle()
+  const sessionQuery = h.spawns.find((s) => s.argv.includes('session'))
+  const types = sessionQuery.argv.filter((a, i) => i > 0 && sessionQuery.argv[i - 1] === '--type')
+  assert.deepEqual(types, ['session', 'codex_session'], 'recalls both profile spellings')
+  console.log('ok  brief recall: both bm profile spellings')
 }
 
 // --- 8b. an unconfigured plugin omits --project but keeps --folder ------
@@ -526,7 +752,7 @@ console.log('ok  config: defaults carry no path, version, or project; preference
 // zero-config path must not invent one. `--folder` is required by bm, so it is
 // always emitted.
 {
-  const messages = [{ role: 'user', content: [{ type: 'text', text: 'Do the thing' }] }]
+  const messages = [humanTurn('Do the thing')]
   const session = makeSession({ messages })
   const h = makeHarness({ config: { project: '' } })
   h.emit('session/event', session, { type: 'compaction/start', seq: 1, data: { compactionId: 'c', turn: 1 } })
@@ -536,7 +762,7 @@ console.log('ok  config: defaults carry no path, version, or project; preference
   assert.equal(h.spawns.length, 1, 'one write')
   const argv = h.spawns[0].argv
   assert.ok(!argv.includes('--project'), 'no --project when unconfigured')
-  assert.equal(argv[argv.indexOf('--folder') + 1], 'codex', 'folder still passed (bm requires it)')
+  assert.equal(argv[argv.indexOf('--folder') + 1], 'sessions', 'folder still passed (bm requires it)')
   assert.ok(argv.includes('--title'), 'still writes a titled note')
   assert.ok(argv.includes('--content'), 'still writes content')
   const content = argv[argv.indexOf('--content') + 1]
@@ -546,7 +772,7 @@ console.log('ok  config: defaults carry no path, version, or project; preference
 
 // --- 9. non-compaction events are ignored --------------------------------
 {
-  const session = makeSession({ messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })
+  const session = makeSession({ messages: [humanTurn('hi')] })
   const h = makeHarness()
   h.emit('session/event', session, { type: 'turn/start', seq: 1, data: { turn: 1 } })
   await settle()
@@ -556,7 +782,7 @@ console.log('ok  config: defaults carry no path, version, or project; preference
 
 // --- 10. checkpointOnCompact=false disables it ---------------------------
 {
-  const session = makeSession({ messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })
+  const session = makeSession({ messages: [humanTurn('hi')] })
   const h = makeHarness({ config: { checkpointOnCompact: false } })
   h.emit('session/event', session, { type: 'compaction/start', seq: 1, data: { compactionId: 'c', turn: 1 } })
   await settle()
@@ -625,7 +851,7 @@ console.log('ok  config: defaults carry no path, version, or project; preference
 // --- 15. /bm-checkpoint writes now --------------------------------------
 {
   const session = makeSession({
-    messages: [{ role: 'user', content: [{ type: 'text', text: 'Write the checkpoint test' }] }],
+    messages: [humanTurn('Write the checkpoint test')],
   })
   const h = makeHarness()
   const command = h.commands.find((c) => c.name === 'bm-checkpoint')
@@ -636,7 +862,7 @@ console.log('ok  config: defaults carry no path, version, or project; preference
     signal: new AbortController().signal,
   })
   assert.equal(result.kind, 'success', 'success result')
-  assert.match(result.text, /Checkpoint written: DSH session/, 'reports the title')
+  assert.match(result.text, /Checkpoint written: Session/, 'reports the title')
   const argv = h.spawns[0].argv
   assert.match(argv[argv.indexOf('--content') + 1], /trigger: "manual"/, 'manual trigger')
   console.log('ok  /bm-checkpoint')
@@ -644,7 +870,7 @@ console.log('ok  config: defaults carry no path, version, or project; preference
 
 // --- 16. /bm-checkpoint with no user turn reports honestly --------------
 {
-  const session = makeSession({ messages: [{ role: 'assistant', content: [{ type: 'text', text: 'hello' }] }] })
+  const session = makeSession({ messages: [{ role: 'assistant', source: { kind: 'model' }, content: [{ type: 'text', text: 'hello' }] }] })
   const h = makeHarness()
   const command = h.commands.find((c) => c.name === 'bm-checkpoint')
   const result = await command.handler({
@@ -657,6 +883,61 @@ console.log('ok  config: defaults carry no path, version, or project; preference
   assert.match(result.text, /Nothing to checkpoint/, 'honest message')
   assert.equal(h.spawns.length, 0, 'no write attempted')
   console.log('ok  /bm-checkpoint: no user turn')
+}
+
+// --- 16b. a transcript holding only injected context is not a user turn ---
+// The regression this guards: `agent-loop` appends every `agent/pre-step`
+// injection as a `user`-role message, so a role-only filter treated this
+// plugin's own brief and the harness runtime context as the user's words.
+// Before the fix, the three most recent turns of a briefed session were
+// almost always injected context, so the checkpoint captured noise — and the
+// next brief then recalled that noise as if it were the thread.
+{
+  const session = makeSession({
+    messages: [
+      injectedTurn('# Basic Memory — session context\n\n**Project:** project-memory\n## Active tasks (5)'),
+      injectedTurn('runtime context blob from the harness', 'runtime-context'),
+      injectedTurn('tool registry notice', 'tool-registry'),
+    ],
+  })
+  const h = makeHarness()
+  const command = h.commands.find((c) => c.name === 'bm-checkpoint')
+  const result = await command.handler({
+    agent: makeAgent(session),
+    rawInput: '',
+    attachments: [],
+    signal: new AbortController().signal,
+  })
+  assert.equal(result.kind, 'error', 'reports an error, does not write')
+  assert.match(result.text, /Nothing to checkpoint/, 'honest message')
+  assert.equal(h.spawns.length, 0, 'no write attempted')
+  console.log('ok  /bm-checkpoint: injected context is not a user turn')
+}
+
+// --- 16c. human turns survive alongside injected context ----------------
+{
+  const session = makeSession({
+    messages: [
+      humanTurn('real opening request'),
+      injectedTurn('# Basic Memory — session context\n\n**Project:** project-memory'),
+      humanTurn('second real turn'),
+    ],
+  })
+  const h = makeHarness()
+  const command = h.commands.find((c) => c.name === 'bm-checkpoint')
+  const result = await command.handler({
+    agent: makeAgent(session),
+    rawInput: '',
+    attachments: [],
+    signal: new AbortController().signal,
+  })
+  assert.equal(result.kind, 'success', 'a real turn still checkpoints')
+  const content = h.spawns[0].argv[h.spawns[0].argv.indexOf('--content') + 1]
+  assert.match(content, /Opening request: real opening request/, 'opening is the human turn')
+  assert.match(content, /- second real turn/, 'recent thread keeps the human turn')
+  assert.ok(!/Basic Memory — session context/.test(content), 'the injected brief is excluded')
+  assert.ok(!/runtime context blob/.test(content), 'the runtime context is excluded')
+  console.log('ok  /bm-checkpoint: human turns kept, injected context dropped')
 }
 
 // --- 17. a missing bm executable fails open ------------------------------
@@ -692,7 +973,7 @@ console.log('ok  config: defaults carry no path, version, or project; preference
 
 // --- 18. a failing CLI is logged, not thrown ----------------------------
 {
-  const session = makeSession({ messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })
+  const session = makeSession({ messages: [humanTurn('hi')] })
   const h = makeHarness({
     bm: { run: () => ({ exitCode: 2, stdout: '', stderr: 'project not found' }) },
   })
@@ -704,6 +985,50 @@ console.log('ok  config: defaults carry no path, version, or project; preference
     'logs the failure',
   )
   console.log('ok  failing CLI: logged, not thrown')
+}
+
+// --- 18b. a rejected handle.done is reported, never thrown ----------------
+// The subprocess contract allows `done` to REJECT for spawn/provider failures,
+// not only resolve with a non-zero exit. An earlier revision awaited it inside
+// a bare try/finally, so the rejection escaped every caller: `/bm-status`,
+// `/bm-flush` and `/bm-project` threw into the command dispatcher and the
+// plugin logged nothing at all, contradicting its own documented fail-open
+// behavior. Command handlers carry no try/catch of their own for this, so the
+// containment has to live in runBm.
+{
+  const rejecting = () => ({
+    stdin: undefined, stdout: undefined, stderr: undefined, control: undefined,
+    collected: {
+      stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
+      stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
+    },
+    done: Promise.reject(new Error('spawn EPERM')),
+    terminate: () => {},
+    waitForExit: async () => true,
+  })
+  const session = makeSession({ messages: [humanTurn('hi')] })
+  const h = makeHarness()
+  h.ctx.subprocess.spawn = (spec) => {
+    h.spawns.push(spec)
+    return rejecting()
+  }
+
+  for (const name of ['bm-status', 'bm-flush', 'bm-project', 'bm-checkpoint']) {
+    const command = h.commands.find((c) => c.name === name)
+    const result = await command.handler({
+      agent: makeAgent(session),
+      rawInput: '',
+      attachments: [],
+      signal: new AbortController().signal,
+    })
+    assert.equal(result.kind, 'error', `${name} reports a failure instead of throwing`)
+    assert.match(result.text, /EPERM/, `${name} surfaces the reason`)
+  }
+  assert.ok(
+    h.logs.some((entry) => entry.level === 'warn' && /spawn failed/.test(entry.line)),
+    'the rejection is logged, not swallowed silently',
+  )
+  console.log('ok  rejected handle.done: every command fails open, nothing throws')
 }
 
 // --- 19. a slow brief does not stall the step ----------------------------
@@ -1045,12 +1370,15 @@ console.log('ok  config: defaults carry no path, version, or project; preference
 
 // --- 30. auto-detection is opt-in and never adds a CLI call when off -----
 // Defaults matter: an unconfigured plugin must behave exactly as before, so a
-// session must not pay for `bm project list` unless the feature is enabled.
+// session must not pay for `bm project list` for *resolution* unless
+// auto-detection is enabled. The project-knowledge section is a separate
+// feature with its own config, so it is disabled here to isolate this
+// contract (its list call is covered in 4c).
 {
   const defaults = plugin.Config.parse({})
   assert.equal(read(defaults, 'autoDetectProject'), false, 'auto-detection is off by default')
 
-  const h = makeHarness({ config: { project: 'project-memory' } })
+  const h = makeHarness({ config: { project: 'project-memory', projectKnowledge: false } })
   h.emit('agent/created', { agent: makeAgent(makeSession({ cwd: 'D:/work' })) })
   await settle()
   await settle()
@@ -1094,12 +1422,21 @@ console.log('ok  config: defaults carry no path, version, or project; preference
 }
 
 // --- 32. a workspace outside every project still gets a brief -----------
-// The fallback chain must end at bm's own default_project, or a plain workspace
+// The fallback chain must end at bm's default project, or a plain workspace
 // directory would silently lose its session context.
+//
+// The envelope carries ONLY `projects` — verified against bm 0.23.2, which
+// emits no `default_project` key (it lives in ~/.basic-memory/config.json).
+// The default is the row flagged `is_default`, which is the same column
+// `bm project list` renders as `[X]`. Asserting the real shape is the point:
+// an earlier revision read a `default_project` key this CLI never sends, so
+// the last fallback was unreachable and this case passed on a fiction.
 {
   const listOutput = JSON.stringify({
-    projects: [{ name: 'work', local_path: 'D:/work', is_default: false }],
-    default_project: 'main',
+    projects: [
+      { name: 'work', local_path: 'D:/work', is_default: false },
+      { name: 'main', local_path: 'C:/Users/x/basic-memory', is_default: true },
+    ],
   })
   const h = makeHarness({
     config: { project: '', autoDetectProject: true },
@@ -1117,9 +1454,40 @@ console.log('ok  config: defaults carry no path, version, or project; preference
   const queries = h.spawns.filter((s) => s.argv.includes('search-notes'))
   assert.equal(queries.length, 3, 'the fallback still produces a brief')
   for (const query of queries) {
-    assert.equal(query.argv[query.argv.indexOf('--project') + 1], 'main', "falls back to bm's default_project")
+    assert.equal(query.argv[query.argv.indexOf('--project') + 1], 'main', 'falls back to the is_default project')
   }
-  console.log('ok  autoDetectProject: fallback reaches bm default_project')
+  console.log('ok  autoDetectProject: fallback reaches the default project')
+}
+
+// --- 32b. no default project means the brief honestly stays empty --------
+// With no `is_default` row and no configured project there is nothing to read:
+// the plugin must not invent one. (An earlier revision read a `default_project`
+// key that never arrives, which made this case look like a working fallback.)
+{
+  const listOutput = JSON.stringify({
+    projects: [{ name: 'work', local_path: 'D:/work', is_default: false }],
+  })
+  const h = makeHarness({
+    config: { project: '', autoDetectProject: true },
+    bm: {
+      run: (argv) => {
+        if (argv.includes('project')) return { exitCode: 0, stdout: listOutput, stderr: '' }
+        return { exitCode: 0, stdout: JSON.stringify({ results: [{ title: 'T', permalink: 'p' }] }), stderr: '' }
+      },
+    },
+  })
+  h.emit('agent/created', { agent: makeAgent(makeSession({ cwd: 'C:/Users/x/default-workspace' })) })
+  await settle()
+  await settle()
+
+  assert.equal(h.spawns.filter((s) => s.argv.includes('search-notes')).length, 0, 'no brief query with no project')
+  const decision = await h.raise(
+    'agent/pre-step',
+    { agent: makeAgent(makeSession({ cwd: 'C:/Users/x/default-workspace' })), step: 1, turn: 1, messages: [], signal: new AbortController().signal },
+    () => ({ kind: 'enter', messages: [] }),
+  )
+  assert.equal(decision.messages.length, 0, 'no context invented')
+  console.log('ok  autoDetectProject: no default project means no invented target')
 }
 
 // --- 33. the Settings bridge is registered only with a web server -------

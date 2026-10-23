@@ -204,6 +204,18 @@ assert.ok(!/writeFile|writeFileSync|\.patch\.yml['"]\s*\)/.test(source), 'the cl
 assert.ok(!/\.\.\/package\.json/.test(source), 'the client never edits the manifest')
 assert.ok(/\.mutate\(/.test(source), 'writes go through the config form')
 
+// The standing-instructions editor must ride the same transport as every other
+// preference: a textarea bound to `briefNote`, and a `set` op for it in the
+// atomic save. Asserting the op matters — a field rendered but never written
+// would look editable and silently drop the edit.
+assert.ok(/briefNote/.test(source), 'the page knows the briefNote preference')
+assert.ok(/briefNoteClear/.test(source), 'the page offers a way to clear it')
+assert.ok(
+  /path:\s*\[\s*'briefNote'\s*\]/.test(source),
+  'saving writes briefNote through the config form',
+)
+assert.ok(/bmh-textarea/.test(source), 'briefNote is edited in a textarea (multi-line rules)')
+
 console.log('ok  client: registers one settings page with hook sources')
 console.log('ok  client: requires only platform modules')
 console.log('ok  client: writes through the settings transport')
