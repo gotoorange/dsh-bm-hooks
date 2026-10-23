@@ -196,5 +196,62 @@ const mockFs = {
   console.log('ok  on-disk casing wins over candidate casing')
 }
 
+// --- folder exists but has no _index.md -> not a project ------------------
+// A directory under `projects/` is not a project until it has an entry note.
+// Matching one would print a path the reader cannot open.
+{
+  const bare = mkdtempSync(join(tmpdir(), 'bm-noindex-'))
+  const bareProjects = join(bare, 'projects')
+  mkdirSync(join(bareProjects, 'noindex'), { recursive: true })
+  // Deliberately no `_index.md`.
+  const entry = findProjectEntry(join(bareProjects, 'noindex'), bare, { fs: mockFs })
+  assert.equal(entry, null, 'a folder without _index.md is not a project')
+  rmSync(bare, { recursive: true, force: true })
+  console.log('ok  folder without _index.md returns null')
+}
+
+// --- CJK folder names are legal project names ----------------------------
+// The memory project really contains `basic-memory_记忆`, so the whitelist must
+// accept CJK: rejecting it would silently drop that project from every brief.
+{
+  const cjk = mkdtempSync(join(tmpdir(), 'bm-cjk-'))
+  const cjkProjects = join(cjk, 'projects')
+  mkdirSync(join(cjkProjects, 'basic-memory_记忆'), { recursive: true })
+  writeFileSync(join(cjkProjects, 'basic-memory_记忆', '_index.md'), '# 记忆索引\n', 'utf8')
+  const entry = findProjectEntry(join(cjkProjects, 'basic-memory_记忆'), cjk, { fs: mockFs })
+  assert.ok(entry, 'CJK folder name matches')
+  assert.equal(entry.base, 'basic-memory_记忆')
+  assert.equal(entry.title, '记忆索引')
+  rmSync(cjk, { recursive: true, force: true })
+  console.log('ok  CJK folder name is accepted')
+}
+
+// --- the whitelist keeps a cwd segment from escaping the root ------------
+// `..`, `.`, a drive letter, or a path separator in a cwd segment must never be
+// turned into a path under the memory root. `isSafeBase` is the only guard, so
+// assert it from the outside: none of these may produce an entry.
+{
+  const hostile = mkdtempSync(join(tmpdir(), 'bm-safe-'))
+  const hostileProjects = join(hostile, 'projects')
+  mkdirSync(join(hostileProjects, 'real'), { recursive: true })
+  writeFileSync(join(hostileProjects, 'real', '_index.md'), '# real\n', 'utf8')
+
+  for (const cwd of [
+    join(hostileProjects, '..'),        // basename `..`
+    join(hostileProjects, '.'),         // basename `.`
+    join(hostile, 'C:'),                // drive-ish segment
+    join(hostile, 'has space'),         // whitespace is not in the whitelist
+    join(hostile, 'quote"name'),        // nor is a quote
+  ]) {
+    assert.equal(
+      findProjectEntry(cwd, hostile, { fs: mockFs }),
+      null,
+      `unsafe cwd segment must not match: ${cwd}`,
+    )
+  }
+  rmSync(hostile, { recursive: true, force: true })
+  console.log('ok  unsafe cwd segments never match')
+}
+
 rmSync(root, { recursive: true, force: true })
 console.log('\nall project-entry checks passed')

@@ -61,7 +61,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/native.mjs && node test/client.mjs",
+    "test": "node test/native.mjs && node test/client.mjs && node test/projectentry.mjs",
     "test:live": "node test/projects.mjs",
     "check": "node --check lib/index.js && node --check lib/projects.js && node --check lib/client.js && npm test"
   },
