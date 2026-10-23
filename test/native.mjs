@@ -483,6 +483,19 @@ console.log('ok  config: defaults carry no path, version, or project; preference
   assert.match(text, /dangan2 — 项目索引/, 'entry title surfaced')
   assert.match(text, /Read this entry note/, 'explicit read instruction')
   assert.ok(text.indexOf('Project knowledge') < text.indexOf('Active tasks'), 'knowledge section precedes recall')
+  // Regression: the knowledge lines were pushed as a nested array, so the
+  // section's own lines got joined with commas and printed on one line:
+  //   `## Project knowledge (dangan2),- title — path,  Read this …`
+  // Each line must stand alone.
+  assert.ok(
+    !/## Project knowledge \([^)]*\),/.test(text),
+    'the knowledge heading is not comma-joined to the next line',
+  )
+  assert.match(
+    text,
+    /## Project knowledge \(dangan2\)\n- dangan2 — 项目索引 — projects\/dangan2\/_index\.md\n {2}Read this entry note/,
+    'the three knowledge lines are separate, newline-terminated lines',
+  )
   console.log('ok  project knowledge: one list query + entry section first')
 
   rmSync(memRoot, { recursive: true, force: true })
